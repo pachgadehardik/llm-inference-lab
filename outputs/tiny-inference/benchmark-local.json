@@ -1,0 +1,94 @@
+{
+  "scope": "Untrained tiny CPU model; timings do not predict production LLM performance",
+  "python": "3.9.6",
+  "numpy": "1.26.3",
+  "platform": "macOS-14.5-arm64-arm-64bit",
+  "config": {
+    "vocab_size": 256,
+    "width": 64,
+    "heads": 4,
+    "layers": 2,
+    "max_context": 48
+  },
+  "arguments": {
+    "prompt_tokens": 32,
+    "new_tokens": 16,
+    "repeats": 5
+  },
+  "thread_env": {
+    "OMP_NUM_THREADS": "unset",
+    "OPENBLAS_NUM_THREADS": "unset",
+    "VECLIB_MAXIMUM_THREADS": "unset"
+  },
+  "cache_allocated_bytes": 49152,
+  "cache_used_after_prefill_bytes": 32768,
+  "greedy_outputs_equal": true,
+  "raw_samples": {
+    "uncached": [
+      {
+        "local_ttft_ms": 0.5500410000000011,
+        "mean_inter_token_ms": 6.676899999999999,
+        "total_ms": 100.70354099999997
+      },
+      {
+        "local_ttft_ms": 0.6507500000000332,
+        "mean_inter_token_ms": 1.8749999999999971,
+        "total_ms": 28.775749999999988
+      },
+      {
+        "local_ttft_ms": 0.7624999999999993,
+        "mean_inter_token_ms": 1.2735777999999993,
+        "total_ms": 19.86616699999999
+      },
+      {
+        "local_ttft_ms": 0.5648329999999868,
+        "mean_inter_token_ms": 1.2729750000000022,
+        "total_ms": 19.65945800000002
+      },
+      {
+        "local_ttft_ms": 0.5386250000000148,
+        "mean_inter_token_ms": 4.761097200000001,
+        "total_ms": 71.95508300000003
+      }
+    ],
+    "cached": [
+      {
+        "local_ttft_ms": 0.539875000000023,
+        "mean_inter_token_ms": 1.880533333333334,
+        "total_ms": 28.747875000000032
+      },
+      {
+        "local_ttft_ms": 7.270916999999988,
+        "mean_inter_token_ms": 1.198858333333334,
+        "total_ms": 25.253791999999997
+      },
+      {
+        "local_ttft_ms": 0.5509579999999903,
+        "mean_inter_token_ms": 0.183116666666668,
+        "total_ms": 3.2977080000000103
+      },
+      {
+        "local_ttft_ms": 0.5815829999999966,
+        "mean_inter_token_ms": 0.5489444666666676,
+        "total_ms": 8.815750000000012
+      },
+      {
+        "local_ttft_ms": 2.4345830000000457,
+        "mean_inter_token_ms": 0.5187861333333303,
+        "total_ms": 10.216375
+      }
+    ]
+  },
+  "medians": {
+    "uncached": {
+      "local_ttft_ms": 0.5648329999999868,
+      "mean_inter_token_ms": 1.8749999999999971,
+      "total_ms": 28.775749999999988
+    },
+    "cached": {
+      "local_ttft_ms": 0.5815829999999966,
+      "mean_inter_token_ms": 0.5489444666666676,
+      "total_ms": 10.216375
+    }
+  }
+}

@@ -1,0 +1,218 @@
+<div id="inference-flow-lab">
+  <div class="viz-controls">
+    <label class="form-label" for="ifl-scene">Explore the data flow
+      <select class="form-select" id="ifl-scene">
+        <option value="flow">1 · Inside a generation step</option>
+        <option value="attention">2 · Who can attend to whom?</option>
+        <option value="cache">3 · Prefill, decode, and KV reuse</option>
+        <option value="schedule">4 · Requests sharing a worker</option>
+      </select>
+    </label>
+  </div>
+  <div class="viz-row">
+    <button class="btn" id="ifl-back" type="button">Previous</button>
+    <button class="btn btn-primary" id="ifl-play" type="button">Play</button>
+    <button class="btn" id="ifl-next" type="button">Next</button>
+    <span class="text-small tabular-nums" id="ifl-count"></span>
+  </div>
+  <div id="ifl-stage"></div>
+  <div class="text-small" id="ifl-detail" aria-live="polite"></div>
+</div>
+<style>
+#inference-flow-lab { color:var(--foreground); }
+#inference-flow-lab #ifl-stage { margin:16px 0 8px; }
+#inference-flow-lab .ifl-svg { display:block; width:100%; overflow:visible; }
+#inference-flow-lab .ifl-svg text { fill:var(--foreground); font-size:12px; font-family:inherit; }
+#inference-flow-lab .ifl-svg .secondary { fill:var(--muted-foreground); }
+#inference-flow-lab .ifl-svg .box { fill:var(--muted); }
+#inference-flow-lab .ifl-svg .active { fill:var(--viz-series-1); fill-opacity:0.2; }
+#inference-flow-lab .ifl-svg .new { fill:var(--viz-series-1); fill-opacity:0.3; }
+#inference-flow-lab .ifl-svg .reused { fill:var(--viz-series-2); fill-opacity:0.22; }
+#inference-flow-lab .ifl-svg .waiting { fill:var(--muted); }
+#inference-flow-lab .ifl-svg .edge { fill:none; stroke:var(--border); stroke-width:1.5; }
+#inference-flow-lab .ifl-svg .cursor { fill:var(--viz-series-1); }
+#inference-flow-lab #ifl-detail { min-height:2.5em; }
+</style>
+<script>
+(() => {
+  const root = document.getElementById('inference-flow-lab');
+  const select = root.querySelector('#ifl-scene');
+  const stage = root.querySelector('#ifl-stage');
+  const detail = root.querySelector('#ifl-detail');
+  const back = root.querySelector('#ifl-back');
+  const next = root.querySelector('#ifl-next');
+  const play = root.querySelector('#ifl-play');
+  const count = root.querySelector('#ifl-count');
+  const reduced = window.matchMedia('(prefers-reduced-motion: reduce)');
+  const lengths = {flow:8, attention:4, cache:4, schedule:6};
+  let scene = 'flow', step = 0, timer = null, last = null;
+  const ns = 'http://www.w3.org/2000/svg';
+  const flowNames = ['Text → token IDs', 'Token + position embeddings', 'LayerNorm → Q, K, V', 'Causal attention + residual', 'LayerNorm → MLP + residual', 'Final norm → vocabulary scores', 'Select next token', 'Stream token; repeat if needed'];
+  const flowShapes = ['T input IDs', '[T, 64]', 'each [4, T, 16]', '[T, 64]', '[T, 64]', '[T, 256] → last row', '1 selected token ID', 'Next forward consumes this ID'];
+  const explanations = {
+    flow:[
+      'Token IDs are integers; tokenization depends on the model.',
+      'Each token becomes a vector with position information.',
+      'Each head builds queries, keys, and values from normalized vectors.',
+      'Each query mixes allowed value vectors; the residual carries the input forward.',
+      'The MLP transforms each position; steps 3–5 repeat for every decoder block.',
+      'The last position supplies the scores used to select the next token.',
+      'Greedy selection takes the highest score; sampling can choose differently.',
+      'Unless stopping, the selected token is fed into the next model step.'
+    ],
+    attention:[
+      'Query t0 can read only key t0; later positions are masked.',
+      'Query t1 can read keys t0 and t1; weights sum to one.',
+      'Query t2 can read keys t0–t2 and combine their value vectors.',
+      'Query t3 can read all four positions; rows are revealed sequentially only for teaching.'
+    ],
+    cache:[
+      'Prefill stores prompt K/V and selects g1; g1 is not yet in the cache.',
+      'Decode consumes g1, appends its K/V, reuses the prompt cache, and selects g2.',
+      'Decode consumes g2; earlier K/V remain stored and are read by attention.',
+      'Decode consumes g3 and selects g4; cache length is one token behind the displayed sequence.'
+    ],
+    schedule:[
+      'Two slots admit A and B; each prefill produces its first output token.',
+      'C arrives, but both slots are occupied; C waits.',
+      'A emits its final token; its slot and cache can now be released.',
+      'C enters the freed slot while B continues decoding.',
+      'B emits its final token; C continues decoding.',
+      'C finishes; both slots are now free.'
+    ]
+  };
+  function el(tag, attrs={}, text) {
+    const n=document.createElementNS(ns,tag);
+    Object.entries(attrs).forEach(([k,v])=>n.setAttribute(k,String(v)));
+    if(text!==undefined)n.textContent=text;
+    return n;
+  }
+  function text(svg,x,y,value,attrs={}) {svg.append(el('text',{x,y,...attrs},value));}
+  function rect(svg,x,y,w,h,cls='box') {svg.append(el('rect',{x,y,width:w,height:h,rx:3,class:cls}));}
+  function svgFor(w,h,title) {
+    const svg=el('svg',{viewBox:`0 0 ${w} ${h}`,height:h,role:'img','aria-label':title,class:'ifl-svg'});
+    svg.append(el('title',{},title)); return svg;
+  }
+  function marker(svg,x,y,animate) {
+    const dot=el('circle',{cx:0,cy:0,r:4,class:'cursor',transform:`translate(${x} ${y})`});
+    svg.append(dot);
+    if(animate && last && last.scene===scene && !reduced.matches) {
+      dot.animate([{transform:`translate(${last.x}px,${last.y}px)`},{transform:`translate(${x}px,${y}px)`}],{duration:500,easing:'ease-in-out'});
+    }
+    last={scene,x,y};
+  }
+  function flow(w,animate) {
+    const h=512,svg=svgFor(w,h,'Eight stages inside an autoregressive generation step. Shapes use the tiny decoder configuration.');
+    text(svg,12,16,w<420?'4 heads · width 64 · vocab 256':'Tiny decoder · 4 heads · width 64 · vocabulary 256',{class:'secondary'});
+    const x=24,boxw=w-36;
+    for(let i=0;i<8;i++) {
+      const y=34+i*58;
+      if(i<7)svg.append(el('path',{d:`M ${x+boxw/2} ${y+48} v 10`,class:'edge'}));
+      rect(svg,x,y,boxw,48,i===step?'active':'box');
+      text(svg,x+12,y+19,`${i+1}. ${flowNames[i]}`);
+      text(svg,x+12,y+37,flowShapes[i],{class:'secondary'});
+    }
+    marker(svg,10,58+58*step,animate);
+    return svg;
+  }
+  function attention(w,animate) {
+    const svg=svgFor(w,344,'Causal attention mask for four tokens, with illustrative normalized weights for the selected query.');
+    const cell=Math.min(70,(w-64)/4),x=52,y=75;
+    text(svg,10,16,w<420?'One head · illustrative weights':'One head · illustrative weights, not measured activations',{class:'secondary'});
+    text(svg,x,40,'Keys / values →');
+    const weights=[[1,0,0,0],[.35,.65,0,0],[.2,.3,.5,0],[.1,.15,.25,.5]];
+    for(let j=0;j<4;j++) text(svg,x+j*cell+cell/2,63,`t${j}`,{'text-anchor':'middle'});
+    for(let i=0;i<4;i++) {
+      text(svg,8,y+i*46+27,`Q t${i}`);
+      for(let j=0;j<4;j++) {
+        const active=i===step && j<=i;
+        rect(svg,x+j*cell,y+i*46,cell-4,40,active?'new':'box');
+        const label=j>i?'×':(i===step?weights[i][j].toFixed(2):'·');
+        text(svg,x+j*cell+(cell-4)/2,y+i*46+25,label,{'text-anchor':'middle'});
+      }
+    }
+    text(svg,10,285,'× future masked   · allowed, inactive row',{class:'secondary'});
+    text(svg,10,315,`Q t${step} → weighted mix of V t0${step?`…t${step}`:''}`);
+    marker(svg,w-6,y+step*46+20,animate);
+    return svg;
+  }
+  function cache(w,animate) {
+    const svg=svgFor(w,354,'A four-step illustrative generation sequence comparing full recomputation and KV reuse.');
+    const tokens=['t0','t1','t2','g1','g2','g3'],n=3+step;
+    const gap=5,cw=Math.min(64,(w-24-5*gap)/6),x=12;
+    text(svg,12,16,step===0?'Prefill · prompt t0 t1 t2':`Decode ${step} · consume g${step}`);
+    text(svg,12,50,'No cache: forward all positions');
+    text(svg,12,159,'KV cache: forward new positions');
+    for(let j=0;j<n;j++) {
+      const left=x+j*(cw+gap);
+      rect(svg,left,64,cw,44,'new'); text(svg,left+cw/2,91,tokens[j],{'text-anchor':'middle'});
+      const isNew=step===0||j===n-1;
+      rect(svg,left,173,cw,44,isNew?'new':'reused'); text(svg,left+cw/2,200,tokens[j],{'text-anchor':'middle'});
+      text(svg,left+cw/2,235,isNew?'new':'read',{'text-anchor':'middle',class:'secondary'});
+    }
+    text(svg,12,128,`${n} positions forwarded` ,{class:'secondary'});
+    text(svg,12,265,`${step===0?3:1} forwarded · ${n} cached positions after step`);
+    rect(svg,12,287,Math.min(w-24,300),44,'box');
+    text(svg,24,314,`Selected output: g${step+1} · not yet cached`);
+    marker(svg,x+(n-1)*(cw+gap)+cw/2,246,animate);
+    return svg;
+  }
+  function schedule(w,animate) {
+    const svg=svgFor(w,326,'Illustrative continuous batching timeline: two active request slots, six abstract iterations.');
+    const x=35,cw=(w-47)/6,rows=[['P','D','END','','',''],['P','D','D','D','END',''],['','wait','wait','P','D','END']];
+    text(svg,10,16,w<420?'Two slots · iterations, not seconds':'Two active slots · abstract iterations, not elapsed time',{class:'secondary'});
+    text(svg,x,49,'Scheduler iteration →');
+    for(let j=0;j<6;j++)text(svg,x+j*cw+cw/2,74,String(j),{'text-anchor':'middle'});
+    for(let i=0;i<3;i++) {
+      const y=90+i*55;text(svg,10,y+26,['A','B','C'][i]);
+      for(let j=0;j<6;j++) {
+        const state=rows[i][j],shown=j<=step;
+        const cls=!shown||!state?'box':state==='wait'?'waiting':state==='P'?'new':'reused';
+        rect(svg,x+j*cw,y,cw-4,42,cls);
+        text(svg,x+j*cw+(cw-4)/2,y+26,shown?state:'·',{'text-anchor':'middle'});
+      }
+    }
+    text(svg,10,279,'P prefill · D decode · END final decode',{class:'secondary'});
+    text(svg,10,307,'C arrives at 1; enters at 3 after A finishes.');
+    marker(svg,x+step*cw+(cw-4)/2,83,animate);
+    return svg;
+  }
+  function render(animate=false) {
+    const w=Math.max(280,Math.round(stage.getBoundingClientRect().width));
+    const draw={flow,attention,cache,schedule}[scene];
+    stage.replaceChildren(draw(w,animate));
+    detail.textContent=explanations[scene][step];
+    count.textContent=`${step+1} / ${lengths[scene]}`;
+    back.disabled=step===0;next.disabled=step===lengths[scene]-1;
+    play.textContent=timer?'Pause':step===lengths[scene]-1?'Replay':'Play';
+    select.value=scene;
+  }
+  function save() {
+    if(window.openai?.setWidgetState)window.openai.setWidgetState({modelContent:{topic:scene,step:step+1},privateContent:{inferenceFlow:{scene,step}}}).catch(()=>{});
+  }
+  function stop() {if(timer)clearInterval(timer);timer=null;}
+  function move(delta) {stop();step=Math.max(0,Math.min(lengths[scene]-1,step+delta));render(true);save();}
+  function restore(state) {
+    const s=state?.privateContent?.inferenceFlow;
+    if(s && Object.hasOwn(lengths,s.scene) && Number.isInteger(s.step)) {
+      stop();scene=s.scene;step=Math.max(0,Math.min(lengths[scene]-1,s.step));last=null;
+    }
+  }
+  select.addEventListener('change',()=>{stop();scene=select.value;step=0;last=null;render();save();});
+  back.addEventListener('click',()=>move(-1));next.addEventListener('click',()=>move(1));
+  play.addEventListener('click',()=>{
+    if(timer){stop();render();save();return;}
+    if(step===lengths[scene]-1){step=0;last=null;}
+    timer=setInterval(()=>{
+      step++;
+      if(step>=lengths[scene]-1){step=lengths[scene]-1;stop();}
+      render(true);if(!timer)save();
+    },1800);
+    render();save();
+  });
+  document.addEventListener('visibilitychange',()=>{if(document.hidden){stop();render();}});
+  window.addEventListener('openai:set_globals',event=>{if(event.detail?.globals?.widgetState){restore(event.detail.globals.widgetState);render();}});
+  restore(window.openai?.widgetState);render();
+  new ResizeObserver(()=>{last=null;render();}).observe(stage);
+})();
+</script>
